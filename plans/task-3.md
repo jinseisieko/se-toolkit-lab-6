@@ -7,6 +7,7 @@ Extend the Task 2 agent with a `query_api` tool that can query the deployed back
 ## LLM Provider
 
 **Provider**: Qwen Code API (same as Tasks 1-2)
+
 - Already configured in `.env.agent.secret`
 - Model: `qwen3-coder-plus`
 
@@ -25,6 +26,7 @@ Query the deployed backend API to get real-time data or verify system behavior.
 ### Returns
 
 JSON string with:
+
 - `status_code`: HTTP status code
 - `body`: Response body as JSON or text
 
@@ -135,12 +137,31 @@ For API queries, include the endpoint in the source.
 ## Agentic Loop
 
 The agentic loop remains the same as Task 2:
+
 1. Send question + tools to LLM
 2. If tool_calls present, execute and feed back
 3. If text answer, extract source and return
 4. Max 10 tool calls
 
-## Benchmark Questions
+## Benchmark Results
+
+**Final Score: 10/10 PASSED**
+
+### Iteration History
+
+| Iteration | Score | Failure | Fix |
+|-----------|-------|---------|-----|
+| 1 | 5/10 | Question 5: Status code without auth | Added `use_auth` parameter to `query_api` |
+| 2 | 6/10 | Question 6: Missing source field | Updated `_extract_source` to handle source code files |
+| 3 | 6/10 | Question 6: Max tool calls | Improved system prompt to emphasize file paths in answers |
+| 4 | 10/10 | All passed | - |
+
+### Lessons Learned
+
+1. **Tool parameters matter**: The `use_auth` parameter was essential for testing unauthenticated API access.
+2. **Source extraction**: The `_extract_source` function needed to handle both wiki files and source code files.
+3. **System prompt tuning**: Explicitly telling the LLM to mention file paths in answers improved source detection.
+4. **Max tool calls**: The agentic loop can hit the 10-call limit if the LLM doesn't efficiently use tools.
 
 The `run_eval.py` script tests 10 questions:
 
@@ -180,5 +201,6 @@ The `run_eval.py` script tests 10 questions:
 ## Dependencies
 
 All required dependencies already in `pyproject.toml`:
+
 - `httpx` - HTTP client (for both LLM and API)
 - `pydantic-settings` - Configuration
