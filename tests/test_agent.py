@@ -77,3 +77,99 @@ def test_agent_missing_argument():
     # Should fail with usage message
     assert result.returncode != 0, "Agent should fail without arguments"
     assert "Usage" in result.stderr, "Should show usage message"
+
+
+def test_documentation_agent_reads_file():
+    """
+    Test that the documentation agent uses read_file tool and includes source.
+
+    Question: "How do you resolve a merge conflict?"
+    Expected:
+    - read_file in tool_calls
+    - wiki/git.md or wiki/git-workflow.md or wiki/git-vscode.md in source
+    """
+    project_root = Path(__file__).parent.parent
+
+    question = "How do you resolve a merge conflict?"
+
+    result = subprocess.run(
+        ["uv", "run", "agent.py", question],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        timeout=120,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(
+            f"Agent output is not valid JSON: {result.stdout}\nError: {e}"
+        ) from e
+
+    # Check required fields
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "source" in output, "Missing 'source' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Check that read_file was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "read_file" in tool_names, "Expected read_file to be called"
+
+    # Check that source contains wiki reference
+    source = output["source"]
+    assert "wiki/" in source or any(
+        "wiki/" in tc.get("result", "") for tc in output["tool_calls"]
+    ), "Expected wiki reference in source or tool results"
+
+
+def test_documentation_agent_lists_files():
+    """
+    Test that the documentation agent uses list_files tool.
+
+    Question: "What files are in the wiki directory?"
+    Expected: list_files in tool_calls
+    """
+    project_root = Path(__file__).parent.parent
+
+    question = "What files are in the wiki directory?"
+
+    result = subprocess.run(
+        ["uv", "run", "agent.py", question],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        timeout=60,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(
+            f"Agent output is not valid JSON: {result.stdout}\nError: {e}"
+        ) from e
+
+    # Check required fields
+    assert "answer" in output, "Missing 'answer' field in output"
+    assert "tool_calls" in output, "Missing 'tool_calls' field in output"
+
+    # Check that list_files was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "list_files" in tool_names, "Expected list_files to be called"
+
+    # Check that the tool result contains wiki files
+    for tc in output["tool_calls"]:
+        if tc.get("tool") == "list_files":
+            result_text = tc.get("result", "")
+            path = tc.get("args", {}).get("path", "")
+            assert "wiki" in path, "Expected list_files to be called with wiki path"
+            # Check that result contains some expected files
+            assert ".md" in result_text, "Expected markdown files in result"
