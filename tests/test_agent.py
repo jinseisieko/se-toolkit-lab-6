@@ -173,3 +173,88 @@ def test_documentation_agent_lists_files():
             assert "wiki" in path, "Expected list_files to be called with wiki path"
             # Check that result contains some expected files
             assert ".md" in result_text, "Expected markdown files in result"
+
+
+def test_system_agent_reads_source_code():
+    """
+    Test that the system agent uses read_file for framework questions.
+
+    Question: "What framework does the backend use?"
+    Expected: read_file in tool_calls
+    """
+    project_root = Path(__file__).parent.parent
+
+    question = "What Python web framework does this project's backend use?"
+
+    result = subprocess.run(
+        ["uv", "run", "agent.py", question],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        timeout=60,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(
+            f"Agent output is not valid JSON: {result.stdout}\nError: {e}"
+        ) from e
+
+    # Check required fields
+    assert "answer" in output, "Missing 'answer' field in output"
+
+    # Check that read_file was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "read_file" in tool_names, "Expected read_file to be called"
+
+
+def test_system_agent_queries_api():
+    """
+    Test that the system agent uses query_api for data questions.
+
+    Question: "How many items are in the database?"
+    Expected: query_api in tool_calls
+    """
+    project_root = Path(__file__).parent.parent
+
+    question = "How many items are currently stored in the database?"
+
+    result = subprocess.run(
+        ["uv", "run", "agent.py", question],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        timeout=60,
+    )
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent failed with: {result.stderr}"
+
+    # Parse stdout as JSON
+    try:
+        output = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise AssertionError(
+            f"Agent output is not valid JSON: {result.stdout}\nError: {e}"
+        ) from e
+
+    # Check required fields
+    assert "answer" in output, "Missing 'answer' field in output"
+
+    # Check that query_api was used
+    tool_names = [tc.get("tool") for tc in output["tool_calls"]]
+    assert "query_api" in tool_names, "Expected query_api to be called"
+
+    # Check that the answer contains a number
+    import re
+
+    answer = output.get("answer", "")
+    numbers = re.findall(r"\d+", answer)
+    assert len(numbers) > 0, "Expected a number in the answer"
+    # The number should be greater than 0 (there are items in the database)
+    assert any(int(n) > 0 for n in numbers), "Expected a positive number in the answer"
