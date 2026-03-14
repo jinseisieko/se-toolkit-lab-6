@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent CLI - Documentation agent with tool calling capabilities.
+Agent CLI - System agent with tool calling capabilities.
 
 Usage:
     uv run agent.py "Your question here"
@@ -10,6 +10,7 @@ Output:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,16 +20,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """LLM configuration loaded from .env.agent.secret."""
+    """Configuration loaded from environment variables."""
 
     model_config = SettingsConfigDict(
         env_file=".env.agent.secret",
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
+    # LLM configuration (from .env.agent.secret)
     llm_api_key: str
     llm_api_base: str
     llm_model: str = "qwen3-coder-plus"
+
+    # Backend API configuration (from environment or .env.docker.secret)
+    lms_api_key: str = ""
+    agent_api_base_url: str = "http://localhost:42002"
 
 
 # Maximum number of tool calls per question
@@ -70,26 +77,70 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Query the backend API. Use for data queries (item count, scores) or to check system behavior (status codes, errors). Returns JSON with status_code and body.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method (GET, POST, etc.)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate')",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "JSON request body (optional, for POST/PUT requests)",
+                    },
+                    "use_auth": {
+                        "type": "boolean",
+                        "description": "Whether to send authentication header (default: true). Set to false to test unauthenticated access.",
+                    },
+                },
+                "required": ["method", "path"],
+            },
+        },
+    },
 ]
 
-# System prompt for the documentation agent
-SYSTEM_PROMPT = """You are a documentation agent that answers questions about a software engineering project by reading the project's wiki.
+# System prompt for the system agent
+SYSTEM_PROMPT = """You are a documentation and system agent that answers questions about a software engineering project.
 
-You have access to two tools:
+You have access to three tools:
 - list_files: List files and directories in a given path
 - read_file: Read the contents of a specific file
+- query_api: Query the backend API (use for data queries or to check system behavior)
 
 To answer a question:
-1. First use list_files to discover relevant files in the wiki/ directory
-2. Then use read_file to read specific files that may contain the answer
-3. Look for section headers (lines starting with # or ##) to identify relevant sections
-4. When you find the answer, include the source as: wiki/filename.md#section-anchor
-   - Section anchors are lowercase with hyphens instead of spaces (e.g., "resolving-merge-conflicts")
-5. Once you have enough information, provide your final answer with the source
 
-Always include the source reference in your answer. The source should be in the format: wiki/filename.md#section-anchor
+1. For wiki/documentation questions (e.g., "How do I...", "What steps..."):
+   - Use list_files to discover relevant wiki files
+   - Use read_file to read specific files
+   - In your answer, mention the file path like "According to wiki/git.md..."
 
-If you cannot find the answer in the wiki, say so honestly.
+2. For system fact questions (e.g., "What framework...", "What port...", "What status code..."):
+   - Use read_file to check source code or config files (backend/, docker-compose.yml, .env files)
+   - Or use query_api to check actual system behavior
+   - In your answer, mention the file path like "In backend/app/main.py..."
+
+3. For data queries (e.g., "How many items...", "What is the score..."):
+   - Use query_api to query the backend
+   - Common endpoints: /items/, /analytics/...
+
+4. For bug diagnosis (e.g., "What error...", "What is the bug..."):
+   - FIRST use query_api to reproduce the error
+   - THEN use read_file to find the buggy code in the source
+   - In your answer, explicitly mention the file path like "The bug is in backend/app/routers/analytics.py..."
+   - Explain the root cause and the specific buggy line
+
+Always mention the file path in your answer when you read a file.
+For API queries, mention the endpoint used.
+If you cannot find the answer, say so honestly.
 """
 
 
@@ -186,6 +237,89 @@ def list_files(path: str) -> str:
         return f"Error listing files: {e}"
 
 
+def query_api(
+    method: str, path: str, body: str | None = None, use_auth: bool = True
+) -> str:
+    """
+    Query the backend API.
+
+    Args:
+        method: HTTP method (GET, POST, etc.).
+        path: API endpoint path (e.g., '/items/').
+        body: Optional JSON request body for POST/PUT requests.
+        use_auth: Whether to send authentication header (default: True).
+
+    Returns:
+        JSON string with status_code and body, or error message.
+    """
+    try:
+        # Get configuration from environment
+        base_url = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002")
+        lms_api_key = os.environ.get("LMS_API_KEY", "")
+
+        url = f"{base_url}{path}"
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        # Only add auth header if use_auth is True
+        if use_auth and lms_api_key:
+            headers["Authorization"] = f"Bearer {lms_api_key}"
+
+        print(f"Querying API: {method} {url} (auth={use_auth})", file=sys.stderr)
+
+        with httpx.Client(timeout=30.0) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                response = client.post(url, headers=headers, data=body or "{}")
+            elif method.upper() == "PUT":
+                response = client.put(url, headers=headers, data=body or "{}")
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
+            else:
+                return f"Error: Unsupported method: {method}"
+
+        result = {
+            "status_code": response.status_code,
+            "body": response.text,
+        }
+
+        # Try to parse body as JSON for prettier output
+        try:
+            result["body"] = response.json()
+        except json.JSONDecodeError, ValueError:
+            pass
+
+        print(f"API response: {response.status_code}", file=sys.stderr)
+        return json.dumps(result)
+
+    except httpx.HTTPStatusError as e:
+        return json.dumps(
+            {
+                "status_code": e.response.status_code,
+                "body": e.response.text,
+                "error": str(e),
+            }
+        )
+    except httpx.RequestError as e:
+        return json.dumps(
+            {
+                "status_code": 0,
+                "body": "",
+                "error": f"Request failed: {e}",
+            }
+        )
+    except Exception as e:
+        return json.dumps(
+            {
+                "status_code": 0,
+                "body": "",
+                "error": f"Error: {e}",
+            }
+        )
+
+
 def execute_tool(tool_name: str, args: dict[str, Any]) -> str:
     """
     Execute a tool and return the result.
@@ -203,6 +337,13 @@ def execute_tool(tool_name: str, args: dict[str, Any]) -> str:
         return read_file(args.get("path", ""))
     elif tool_name == "list_files":
         return list_files(args.get("path", ""))
+    elif tool_name == "query_api":
+        return query_api(
+            args.get("method", "GET"),
+            args.get("path", ""),
+            args.get("body"),
+            args.get("use_auth", True),
+        )
     else:
         return f"Error: Unknown tool: {tool_name}"
 
@@ -391,6 +532,8 @@ class Agent:
         Looks for patterns like:
         - wiki/filename.md#section
         - wiki/filename.md
+        - backend/path/file.py
+        - path/to/file.py
 
         Args:
             answer: The answer text.
@@ -407,6 +550,21 @@ class Agent:
 
         # Look for wiki/filename.md pattern
         match = re.search(r"wiki/[\w-]+\.md", answer)
+        if match:
+            return match.group()
+
+        # Look for backend/path/file.py pattern (source code)
+        match = re.search(r"backend/[\w/.-]+\.py", answer)
+        if match:
+            return match.group()
+
+        # Look for any path/file.py pattern
+        match = re.search(r"[\w]+/[\w/.-]+\.py", answer)
+        if match:
+            return match.group()
+
+        # Look for docker-compose.yml or Dockerfile
+        match = re.search(r"(?:docker-compose\.yml|Dockerfile)", answer, re.IGNORECASE)
         if match:
             return match.group()
 
@@ -427,7 +585,7 @@ def main() -> int:
 
     question = sys.argv[1]
 
-    # Load settings
+    # Load LLM settings from .env.agent.secret
     try:
         settings = Settings()
         print("Settings loaded from .env.agent.secret", file=sys.stderr)
@@ -438,6 +596,23 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Load LMS_API_KEY from .env.docker.secret if not already in environment
+    # This allows the autochecker to inject its own value
+    if not os.environ.get("LMS_API_KEY"):
+        env_docker_path = Path(".env.docker.secret")
+        if env_docker_path.exists():
+            for line in env_docker_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("LMS_API_KEY="):
+                    _, _, value = line.partition("=")
+                    os.environ["LMS_API_KEY"] = value.strip().strip('"').strip("'")
+                    print("LMS_API_KEY loaded from .env.docker.secret", file=sys.stderr)
+                    break
+
+    # Set AGENT_API_BASE_URL from settings if not in environment
+    if not os.environ.get("AGENT_API_BASE_URL"):
+        os.environ["AGENT_API_BASE_URL"] = settings.agent_api_base_url
 
     # Create agent and get answer
     try:
